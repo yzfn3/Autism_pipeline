@@ -1,0 +1,19 @@
+b:
+  smooth_ms: 350.0
+  on_thresh: 0.65
+  off_thresh: 0.45
+  min_speech_ms: 400.0
+  merge_gap_ms: 400.0
+  pad_ms: 150.0
+c:
+  min_enroll_dur_sec: 2.5
+  rms_floor_db: -48.0
+d:
+  agg: p90
+  main_thresh: 0.68
+  require_frac_above_thresh: 0.8
+e:
+  merge_gap_sec: 0.6
+  min_main_dur_sec: 0.7
+runtime:
+  speaker_embedding_backend: simple_band_energy

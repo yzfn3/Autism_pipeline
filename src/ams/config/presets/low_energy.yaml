@@ -1,0 +1,6 @@
+b:
+  on_thresh: 0.50
+  off_thresh: 0.32
+  rms_floor_db: -62.0
+d:
+  main_thresh: 0.55

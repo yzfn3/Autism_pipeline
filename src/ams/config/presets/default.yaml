@@ -1,0 +1,2 @@
+runtime:
+  speaker_embedding_backend: simple_band_energy

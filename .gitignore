@@ -1,0 +1,100 @@
+.env
+.env.*
+!.env.example
+
+# Local Python environments and package metadata
+.venv/
+venv/
+.venv*/
+venv*/
+*.egg-info/
+
+# Python/cache artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated AMS/pyannote runs and experiment output
+out*/
+*_out/
+*_output/
+compare_out/
+denoised_output/
+normal_diar/
+pyannote_compare_*/
+pyannote_out/
+single_study*_out/
+study_out*/
+tuning_out*/
+benchmark_out*/
+benchmark_smoke*/
+
+# Heavy/generated media and artifacts
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.rttm
+*.png
+*.vec
+
+# Local temporary files
+tmp/
+temp/
+.tmp/
+
+# Data
+*.wav
+*.mp3
+*.flac
+*.csv
+*.rttm
+*.xlsx
+*.xls
+*.parquet
+*.jsonl
+
+# Benchmark outputs / generated results
+benchmark_*/
+results*/
+outputs*/
+timeline_plots/
+aggregate_heatmaps/
+heatmaps/
+logs/
+artifacts/
+rows/
+timelines/
+
+# Caches / environments
+.venv/
+venv/
+env/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+_tmp/
+_hf_home/
+.cache/
+*.pyc
+
+# Model/download caches
+models/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.nemo
+*.onnx
+*.safetensors
+
+# Secrets
+.env
+*.token
