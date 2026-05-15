@@ -192,11 +192,6 @@ The default full benchmark produces:
 - 6 segmentation models x 6 embedding models = 36 rows
 - 39 rows per recording
 
-For 34 recordings, the expected total is:
-
-```text
-34 x 39 = 1326 rows
-```
 
 ## Run One Recording
 
