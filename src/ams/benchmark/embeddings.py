@@ -10,6 +10,7 @@ from typing import Callable, Dict, List
 
 import numpy as np
 
+from ams.benchmark.compat import patch_nemo_windows_compat, patch_speechbrain_lazy_import_windows
 from ams.dsp.embedding import band_energy_embedding
 
 
@@ -209,10 +210,17 @@ class NemoTitaNetEmbedding(EmbeddingModel):
 
     def __init__(self, model_id: str = "titanet_large"):
         os.environ.setdefault("WANDB_MODE", "disabled")
+        patch_nemo_windows_compat()
+        import torch
         from nemo.collections.asr.models import EncDecSpeakerLabelModel
 
         self.model_id = model_id
-        self.model = EncDecSpeakerLabelModel.from_pretrained(model_id, map_location="cpu")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = EncDecSpeakerLabelModel.from_pretrained(model_id, map_location=self.device)
+        try:
+            self.model.to(self.device)
+        except Exception:
+            pass
         try:
             self.model.eval()
         except Exception:

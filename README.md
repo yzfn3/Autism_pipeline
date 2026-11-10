@@ -61,7 +61,8 @@ Recommended:
 - Git
 - FFmpeg available on `PATH`
 - Enough disk space for model downloads and benchmark outputs
-- GPU optional, but strongly recommended for full benchmark sweeps
+- CPU is sufficient for the built-in smoke test and the microphone comparison.
+  The benchmark's local Pyannote and NeMo diarization adapters require CUDA.
 
 Install FFmpeg:
 
@@ -81,8 +82,8 @@ python --version
 Clone the repository:
 
 ```powershell
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
+git clone https://github.com/yzfn3/Autism_pipeline.git
+cd Autism_pipeline
 ```
 
 Create and activate a virtual environment:
@@ -93,26 +94,43 @@ python -m venv .venv
 python -m pip install --upgrade pip
 ```
 
-Install the project:
+On macOS/Linux, activate with `source .venv/bin/activate` instead.
+
+Install the core package and plotting dependencies:
 
 ```powershell
-pip install -e ".[viz,benchmark]"
-```
-
-For tests only:
-
-```powershell
-pip install -e ".[viz,benchmark,test]"
+python -m pip install -e ".[viz]"
 python -m unittest discover -s tests
 ```
 
-If a dependency is difficult on your platform, install the core package first:
+For the optional model adapters, install the benchmark extra in an environment
+with a compatible PyTorch build. NeMo and FunASR are separate dependencies;
+install them only for the adapters you intend to run. The full model list is not
+needed for the smoke test.
 
 ```powershell
-pip install -e ".[viz]"
+python -m pip install -e ".[viz,benchmark]"
 ```
 
-Then install heavier benchmark packages one by one as needed.
+## Quick CPU Smoke Test
+
+Use any short WAV and a reference CSV with `start_sec,end_sec` columns on the
+same zero-based audio timebase. The intervals should mark the target speaker,
+not all speakers. This command uses built-in baselines and downloads no models:
+
+```powershell
+python orchestrate_benchmark.py `
+  --wav "C:\path\to\recording.wav" `
+  --ref "C:\path\to\target.csv" `
+  --out outputs/smoke `
+  --diarization-pipelines none `
+  --segmenters energy_vad_internal `
+  --embeddings band_energy_internal
+```
+
+Check `outputs/smoke/RESULTS.md` and `outputs/smoke/all_results.csv`. The
+orchestrated benchmark uses labeled reference intervals to enroll the target;
+its scores are not a standalone identification test on unlabeled recordings.
 
 ## Credentials
 
@@ -128,6 +146,45 @@ $env:HF_TOKEN = "hf_your_token_here"
 Never commit tokens. Do not put real tokens in README examples, source code, or
 tracked config files.
 
+## Compare Two Microphones
+
+The paired comparison uses Pyannote Community-1. Install the narrow extra,
+accept the [model terms](https://huggingface.co/pyannote/speaker-diarization-community-1),
+and set `HF_TOKEN` as above. The first run needs the model weights; a cached
+model can be used with `HF_HUB_OFFLINE=1`.
+
+```powershell
+python -m pip install -e ".[viz,pyannote]"
+python scripts/compare_microphones.py `
+  --piezo "C:\path\to\aligned_piezo.wav" `
+  --phone "C:\path\to\aligned_phone.wav" `
+  --reference "C:\path\to\target.csv" `
+  --out outputs/microphone_pair `
+  --device auto
+```
+
+Inputs must already be time-aligned and have identical sample rates and frame
+counts. Equal lengths alone do not establish alignment. Omit `--reference` for
+an unlabeled pair; accuracy fields will be blank. The output directory must be
+new. `comparison.json` includes all anonymous clusters and inference timings;
+`comparison.csv` compares each microphone's longest cluster and the phone
+cluster with the greatest temporal overlap with the piezo anchor, measured by
+Dice. Paired matching uses both recordings and assumes the piezo's longest
+cluster is the wearer. It does not validate standalone phone identification.
+
+To plot supplied precision and recall as percentages with calculated F1:
+
+```powershell
+python scripts/plot_microphone_metrics.py `
+  --piezo 90 85 --phone 80 75 `
+  --title "Example comparison" --hypothetical `
+  --out outputs/example_microphone_scores.png
+```
+
+The example values are illustrative. Keep `--hypothetical` for simulated scores;
+omit it only when plotting observed results. The repository does not include
+private recordings, labels, or past study results.
+
 ## Data Layout
 
 The multi-recording runner accepts one folder containing mixed WAV and CSV files.
@@ -135,10 +192,10 @@ It pairs files by normalized stem:
 
 ```text
 data/
-├── pa14_2024-04-16_17_00.wav
-├── VAD_pa14_2024-04-16_17_00.wav.csv
-├── pa14_2024-04-17_09_33.wav
-└── VAD_pa14_2024-04-17_09_33.wav.csv
+├── session_01.wav
+├── VAD_session_01.wav.csv
+├── session_02.wav
+└── VAD_session_02.wav.csv
 ```
 
 Supported CSV references include simple `start_sec,end_sec` rows and the

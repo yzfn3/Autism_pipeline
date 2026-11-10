@@ -12,6 +12,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from ams.benchmark.audio import load_mono
+from ams.benchmark.compat import patch_nemo_windows_compat, patch_speechbrain_lazy_import_windows
 from ams.benchmark.timeline import Range, merge_ranges
 from ams.dsp.metrics import frame_rms_db
 from ams.dsp.vad_postprocess import ema_smooth, postprocess_vad
@@ -173,21 +174,17 @@ class PyannoteDiarizationSegmenter(Segmenter):
         pipeline_id = self.pipeline_id
         tqdm.write(f"[{self.name}] loading {self.pipeline_id}")
         pipeline = Pipeline.from_pretrained(pipeline_id, token=token)
-        try:
-            import torch
+        import torch
 
-            if torch.cuda.is_available():
-                pipeline.to(torch.device("cuda"))
-        except Exception:
-            pass
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"CUDA is required for {self.name}, but torch.cuda.is_available() is False.")
+        pipeline.to(torch.device("cuda"))
         tqdm.write(f"[{self.name}] running diarization")
         if "precision-2" in self.pipeline_id:
             diar = pipeline(str(wav_path))
         else:
-            import torch
-
             y, sr = load_mono(wav_path, 16000)
-            waveform = torch.from_numpy(y).unsqueeze(0)
+            waveform = torch.from_numpy(y).unsqueeze(0).to(torch.device("cuda"))
             diar = pipeline({"waveform": waveform, "sample_rate": sr})
         turns: List[dict] = []
         ranges: List[Range] = []
@@ -201,13 +198,36 @@ class PyannoteDiarizationSegmenter(Segmenter):
 class NemoSortformerSegmenter(Segmenter):
     name = "nemo_sortformer"
 
-    def __init__(self, model_id: str = "nvidia/diar_sortformer_4spk-v1"):
+    def __init__(
+        self,
+        model_id: str = "nvidia/diar_sortformer_4spk-v1",
+        chunk_sec: float = 85.0,
+        batch_size: int = 1,
+        onset: float = 0.7,
+        offset: float = 0.7,
+        min_duration_on: float = 0.1,
+        min_duration_off: float = 0.1,
+    ):
         os.environ.setdefault("WANDB_MODE", "disabled")
+        patch_nemo_windows_compat()
+        import torch
         from nemo.collections.asr.models import SortformerEncLabelModel
 
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"CUDA is required for {self.name}, but torch.cuda.is_available() is False.")
         self.model_id = model_id
+        self.chunk_sec = float(chunk_sec)
+        self.batch_size = int(batch_size)
+        self.onset = float(onset)
+        self.offset = float(offset)
+        self.min_duration_on = float(min_duration_on)
+        self.min_duration_off = float(min_duration_off)
         tqdm.write(f"[{self.name}] loading {model_id}")
-        self.model = SortformerEncLabelModel.from_pretrained(model_id, map_location="cpu")
+        self.model = SortformerEncLabelModel.from_pretrained(model_id, map_location="cuda")
+        try:
+            self.model.to("cuda")
+        except Exception:
+            pass
         try:
             self.model.eval()
         except Exception:
@@ -215,18 +235,207 @@ class NemoSortformerSegmenter(Segmenter):
 
     @staticmethod
     def _parse_line(line: str) -> dict:
-        parts = line.strip().split()
+        cleaned = line.strip().strip("[]()").replace(",", " ")
+        parts = cleaned.split()
         if len(parts) < 3:
             raise ValueError(f"Unexpected Sortformer segment line: {line!r}")
         return {"start_sec": float(parts[0]), "end_sec": float(parts[1]), "speaker": str(parts[2])}
 
+    @staticmethod
+    def _chunk_manifest_entries(wav_path: Path, duration_sec: float, chunk_sec: float) -> list[dict]:
+        entries: list[dict] = []
+        offset = 0.0
+        idx = 0
+        while offset < duration_sec:
+            dur = min(chunk_sec, duration_sec - offset)
+            if dur <= 0.05:
+                break
+            entries.append(
+                {
+                    "audio_filepath": str(wav_path),
+                    "offset": float(offset),
+                    "duration": float(dur),
+                    "text": "-",
+                    "label": "infer",
+                    "uniq_id": f"{wav_path.stem}_sortformer_{idx:04d}",
+                }
+            )
+            offset += dur
+            idx += 1
+        return entries
+
     def run(self, wav_path: Path) -> SegmenterResult:
+        import tempfile
+
+        from nemo.collections.asr.parts.mixins.diarization import DiarizeConfig, InternalDiarizeConfig
+        from nemo.collections.asr.parts.utils.speaker_utils import audio_rttm_map
+        from nemo.collections.asr.parts.utils.vad_utils import load_postprocessing_from_yaml
+
         tqdm.write(f"[{self.name}] running diarization")
-        out = self.model.diarize(audio=str(wav_path), batch_size=1, num_workers=0, verbose=False)
-        lines = out[0] if out and isinstance(out[0], list) else out
+        y, sr = load_mono(wav_path, 16000)
+        duration_sec = len(y) / float(sr)
+        entries = self._chunk_manifest_entries(wav_path, duration_sec, self.chunk_sec)
+        with tempfile.TemporaryDirectory(prefix="sortformer_manifest_") as td:
+            manifest_path = Path(td) / "manifest.json"
+            with manifest_path.open("w", encoding="utf-8") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry) + "\n")
+
+            self.model._diarize_audio_rttm_map = audio_rttm_map(str(manifest_path))
+            dataloader = self.model._setup_diarize_dataloader(
+                {
+                    "manifest_filepath": str(manifest_path),
+                    "batch_size": self.batch_size,
+                    "session_len_sec": self.chunk_sec,
+                    "num_workers": 0,
+                    "use_lhotse": False,
+                }
+            )
+            postprocessing_params = load_postprocessing_from_yaml(None)
+            postprocessing_params.onset = self.onset
+            postprocessing_params.offset = self.offset
+            postprocessing_params.min_duration_on = self.min_duration_on
+            postprocessing_params.min_duration_off = self.min_duration_off
+            cfg = DiarizeConfig(
+                batch_size=self.batch_size,
+                num_workers=0,
+                verbose=False,
+                include_tensor_outputs=False,
+                postprocessing_params=postprocessing_params,
+                _internal=InternalDiarizeConfig(),
+            )
+            out = self.model.diarize(audio=dataloader, override_config=cfg)
+        if out and isinstance(out, list) and out and isinstance(out[0], list):
+            lines = [line for chunk_lines in out for line in chunk_lines]
+        else:
+            lines = out or []
         turns = [self._parse_line(line) for line in lines]
         ranges = [(t["start_sec"], t["end_sec"]) for t in turns]
-        return SegmenterResult(merge_ranges(ranges), turns, self.name, "diarization")
+        note = (
+            f"{self.model_id}; chunk_sec={self.chunk_sec}; onset={self.onset}; "
+            f"offset={self.offset}; native_nemo_dataloader"
+        )
+        return SegmenterResult(merge_ranges(ranges), turns, self.name, "diarization", note=note)
+
+
+class NemoClusteringDiarizer(Segmenter):
+    name = "nemo_clustering_diarizer"
+
+    def __init__(
+        self,
+        vad_model_id: str = "vad_multilingual_marblenet",
+        speaker_model_id: str = "titanet_large",
+        window_sec: float = 1.5,
+        hop_sec: float = 0.75,
+        max_num_speakers: int = 8,
+    ):
+        os.environ.setdefault("WANDB_MODE", "disabled")
+        patch_nemo_windows_compat()
+        import torch
+        from nemo.collections.asr.models import ClusteringDiarizer
+        from omegaconf import OmegaConf
+
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"CUDA is required for {self.name}, but torch.cuda.is_available() is False.")
+
+        self.vad_model_id = vad_model_id
+        self.speaker_model_id = speaker_model_id
+        self.window_sec = float(window_sec)
+        self.hop_sec = float(hop_sec)
+        self.max_num_speakers = int(max_num_speakers)
+        self._model_cls = ClusteringDiarizer
+        self._cfg = OmegaConf.create(
+            {
+                "device": "cuda",
+                "sample_rate": 16000,
+                "num_workers": 0,
+                "batch_size": 32,
+                "verbose": False,
+                "diarizer": {
+                    "manifest_filepath": "",
+                    "out_dir": "",
+                    "oracle_vad": False,
+                    "collar": 0.0,
+                    "ignore_overlap": False,
+                    "vad": {
+                        "model_path": self.vad_model_id,
+                        "external_vad_manifest": None,
+                        "parameters": {
+                            "window_length_in_sec": 0.15,
+                            "shift_length_in_sec": 0.01,
+                            "smoothing": "median",
+                            "overlap": 0.875,
+                            "onset": 0.4,
+                            "offset": 0.7,
+                            "pad_onset": 0.05,
+                            "pad_offset": -0.1,
+                            "min_duration_on": 0.2,
+                            "min_duration_off": 0.2,
+                            "filter_speech_first": True,
+                        },
+                    },
+                    "speaker_embeddings": {
+                        "model_path": self.speaker_model_id,
+                        "parameters": {
+                            "window_length_in_sec": self.window_sec,
+                            "shift_length_in_sec": self.hop_sec,
+                            "multiscale_weights": None,
+                            "save_embeddings": False,
+                        },
+                    },
+                    "clustering": {
+                        "parameters": {
+                            "oracle_num_speakers": False,
+                            "max_num_speakers": self.max_num_speakers,
+                            "enhanced_count_thres": 80,
+                            "max_rp_threshold": 0.25,
+                            "sparse_search_volume": 30,
+                        },
+                    },
+                },
+            }
+        )
+
+    @staticmethod
+    def _parse_rttm(rttm_path: Path) -> list[dict]:
+        turns: list[dict] = []
+        for line in rttm_path.read_text(encoding="utf-8").splitlines():
+            parts = line.strip().split()
+            if len(parts) < 8 or parts[0].upper() != "SPEAKER":
+                continue
+            start_sec = float(parts[3])
+            dur_sec = float(parts[4])
+            speaker = str(parts[7])
+            turns.append(
+                {
+                    "start_sec": start_sec,
+                    "end_sec": start_sec + dur_sec,
+                    "speaker": speaker,
+                }
+            )
+        return turns
+
+    def run(self, wav_path: Path) -> SegmenterResult:
+        import copy
+        import shutil
+        import tempfile
+
+        tqdm.write(f"[{self.name}] running NeMo clustering diarizer")
+        with tempfile.TemporaryDirectory(prefix="nemo_clustering_") as td:
+            out_dir = Path(td) / "out"
+            cfg = copy.deepcopy(self._cfg)
+            cfg.diarizer.out_dir = str(out_dir)
+            cfg.diarizer.manifest_filepath = str(out_dir / "input_manifest.json")
+            model = self._model_cls(cfg)
+            model.diarize(paths2audio_files=[str(wav_path)], batch_size=32)
+            pred_dir = out_dir / "pred_rttms"
+            rttms = sorted(pred_dir.glob("*.rttm"))
+            if not rttms:
+                raise RuntimeError(f"{self.name} did not produce an RTTM in {pred_dir}")
+            turns = self._parse_rttm(rttms[0])
+            ranges = [(turn["start_sec"], turn["end_sec"]) for turn in turns]
+            note = f"vad={self.vad_model_id}; spk={self.speaker_model_id}"
+            return SegmenterResult(merge_ranges(ranges), turns, self.name, "diarization", note=note)
 
 
 class SileroCamppClusteringDiarizer(Segmenter):
@@ -326,6 +535,7 @@ def segmenter_factories() -> Dict[str, Callable[[], Segmenter]]:
         "pyannote_community_1": lambda: PyannoteDiarizationSegmenter("pyannote_community_1", "pyannote/speaker-diarization-community-1"),
         "pyannote_3_1": lambda: PyannoteDiarizationSegmenter("pyannote_3_1", "pyannote/speaker-diarization-3.1"),
         "nemo_sortformer": lambda: NemoSortformerSegmenter(),
+        "nemo_clustering": lambda: NemoClusteringDiarizer(),
         "silero_campp_clustering": lambda: SileroCamppClusteringDiarizer(),
         "nemo_msdd": lambda: ExternalSegmenter("nemo_msdd", "AMS_NEMO_MSDD_CMD"),
         "eend_m2f": lambda: ExternalSegmenter("eend_m2f", "AMS_EEND_M2F_CMD"),
