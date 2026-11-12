@@ -3,10 +3,12 @@
 This project benchmarks diarization, speech segmentation, and speaker embedding
 pipelines for finding the MAIN speaker timeline in conversational audio.
 
-It was built for studies where each recording has:
+For benchmark evaluation, each recording has:
 
 - a WAV file containing the conversation audio
 - a reference timeline file marking the target/main speaker
+
+For inference on audio alone, see [Run Without Ground Truth](#run-without-ground-truth).
 
 The benchmark compares end-to-end diarization pipelines and segmentation +
 speaker-embedding combinations using DER-style MAIN-speaker error, F1, recall,
@@ -145,6 +147,57 @@ $env:HF_TOKEN = "hf_your_token_here"
 
 Never commit tokens. Do not put real tokens in README examples, source code, or
 tracked config files.
+
+## Run Without Ground Truth
+
+You do not need an annotation CSV to estimate a target-speaker timeline.
+Reference labels are needed to calculate accuracy metrics such as precision,
+recall, and F1. The benchmark commands below require a reference; use one of
+these inference commands instead.
+
+### One Recording
+
+After installing the core package, run the older staged AMS pipeline:
+
+```powershell
+ams all --input "C:\path\to\recording.wav" --out outputs/unlabeled_recording
+```
+
+The default pipeline builds a voice profile from detected speech in the first
+30 seconds, so the wearer should be the only speaker during that period. This
+is enrollment audio, not a human annotation. Read the estimated speech
+intervals in `outputs/unlabeled_recording/final_main_timeline.csv`.
+Use a separate output directory for each recording. The output is an estimate,
+not an accuracy score, and can include the enrollment speech itself.
+
+### Aligned Piezo and Phone Recordings
+
+After installing the Pyannote extra and setting up model access as described
+[below](#compare-two-microphones), run the comparison without `--reference`:
+
+```powershell
+python scripts/compare_microphones.py `
+  --piezo "C:\path\to\aligned_piezo.wav" `
+  --phone "C:\path\to\aligned_phone.wav" `
+  --out outputs/unlabeled_pair `
+  --device auto
+```
+
+`comparison.json` contains the estimated speaker timelines. `comparison.csv`
+reports the selected clusters and their estimated speech durations. Accuracy
+fields are blank. The paired match uses the piezo's longest-duration cluster
+as the target cue; agreement between microphones is not accuracy.
+
+### Reliability Gates
+
+Neither command above applies the study's three reliability gates. A gated
+single-file run would first select the target using an enrollment clip, then
+compute segmentation support, speaker separation, and cross-model disagreement
+from the model outputs. It would apply the development calibration constants,
+gate directions, and cutoffs without refitting them on the new recording.
+The result would be an estimate with an accept or review decision, not a
+measured F1. The full three-gate workflow is not yet exposed as a single-file
+command in this repository.
 
 ## Compare Two Microphones
 
